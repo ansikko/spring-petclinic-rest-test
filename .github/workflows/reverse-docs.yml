@@ -147,26 +147,26 @@ jobs:
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
-import os, json, sys
-try:
-    import yaml
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "PyYAML"])
-    import yaml
-d="target/openapi"; os.makedirs(d, exist_ok=True)
-jp=os.path.join(d,"openapi.json"); yp=os.path.join(d,"openapi.yaml")
-if os.path.isfile(jp) and not os.path.isfile(yp):
-    with open(jp) as f: data=json.load(f)
-    with open(yp,"w") as f: yaml.safe_dump(data,f,sort_keys=False)
-    print("Created openapi.yaml from json")
-elif os.path.isfile(yp) and not os.path.isfile(jp):
-    with open(yp) as f: data=yaml.safe_load(f)
-    with open(jp,"w") as f: json.dump(data,f,indent=2)
-    print("Created openapi.json from yaml")
-else:
-    print("Both or neither present; no conversion")
-PY
+            import os, json, sys
+            try:
+                import yaml
+            except ImportError:
+                import subprocess
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "PyYAML"])
+                import yaml
+            d="target/openapi"; os.makedirs(d, exist_ok=True)
+            jp=os.path.join(d,"openapi.json"); yp=os.path.join(d,"openapi.yaml")
+            if os.path.isfile(jp) and not os.path.isfile(yp):
+                with open(jp) as f: data=json.load(f)
+                with open(yp,"w") as f: yaml.safe_dump(data,f,sort_keys=False)
+                print("Created openapi.yaml from json")
+            elif os.path.isfile(yp) and not os.path.isfile(jp):
+                with open(yp) as f: data=yaml.safe_load(f)
+                with open(jp,"w") as f: json.dump(data,f,indent=2)
+                print("Created openapi.json from yaml")
+            else:
+                print("Both or neither present; no conversion")
+            PY
 
       - name: Install OpenAPI Generator CLI
         shell: bash
