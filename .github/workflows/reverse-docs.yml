@@ -226,29 +226,38 @@ jobs:
           path: ./_artifacts
 
       - name: Prepare site
+        shell: bash
         run: |
-          mkdir -p ./public
+          set -Eeuo pipefail
+          mkdir -p public
+      
+          # API 문서 복사
           if [ -d _artifacts/target/api-docs/json ]; then
-            cp -r _artifacts/target/api-docs/json/* ./public/
+            cp -r _artifacts/target/api-docs/json/* public/
           fi
           if [ -d _artifacts/target/api-docs/yaml ]; then
-            cp -r _artifacts/target/api-docs/yaml/* ./public/
+            cp -r _artifacts/target/api-docs/yaml/* public/
           fi
+      
+          # OpenAPI 스펙 복사
           if [ -d _artifacts/target/openapi ]; then
-            mkdir -p ./public/openapi
-            cp -r _artifacts/target/openapi/* ./public/openapi/
+            mkdir -p public/openapi
+            cp -r _artifacts/target/openapi/* public/openapi/
           fi
-          if [ ! -f ./public/index.html ]; then
-            cat > ./public/index.html <<'HTML'
-            <!doctype html><meta charset="utf-8">
-            <h1>Reverse Docs</h1>
-            <ul>
-              <li><a href="./index.html">API Docs (html2)</a></li>
-              <li><a href="./openapi/openapi.yaml">openapi.yaml</a></li>
-              <li><a href="./openapi/openapi.json">openapi.json</a></li>
-            </ul>
-            HTML
-          fi
+      
+          # heredoc 대신 printf로 index.html 생성 (따옴표/들여쓰기 이슈 회피)
+          printf '%s\n' \
+            '<!doctype html><meta charset="utf-8">' \
+            '<h1>Reverse Docs</h1>' \
+            '<ul>' \
+            '  <li><a href="./index.html">API Docs (html2)</a></li>' \
+            '  <li><a href="./openapi/openapi.yaml">openapi.yaml</a></li>' \
+            '  <li><a href="./openapi/openapi.json">openapi.json</a></li>' \
+            '</ul>' \
+            > public/index.html
+      
+          echo "Public dir contents:"
+          find public -maxdepth 2 -type f -print
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
