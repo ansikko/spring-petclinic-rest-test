@@ -41,6 +41,7 @@ jobs:
           java -version
           ./mvnw -v
 
+      # Build & package
       - name: Build (skip tests)
         shell: bash
         run: |
@@ -61,6 +62,7 @@ jobs:
           echo "JAR_FILE=$JAR_FILE" >> $GITHUB_ENV
           echo "Found: $JAR_FILE"
 
+      # Run app
       - name: Start app (background)
         shell: bash
         run: |
@@ -74,6 +76,7 @@ jobs:
           echo $! > target/petclinic.pid
           echo "PID: $(cat target/petclinic.pid)"
 
+      # Health check
       - name: Wait for health
         shell: bash
         run: |
@@ -105,6 +108,7 @@ jobs:
           (command -v ss >/dev/null && ss -lptn || true)
           exit 1
 
+      # Fetch OpenAPI
       - name: Fetch OpenAPI (JSON/YAML)
         shell: bash
         run: |
@@ -126,6 +130,7 @@ jobs:
           fi
           ls -l target/openapi || true
 
+      # Sanitize OpenAPI (fix invalid fields)
       - name: Sanitize OpenAPI (fix invalid fields)
         shell: bash
         run: |
@@ -142,32 +147,21 @@ jobs:
             echo "No openapi.json to sanitize (skipping)"
           fi
 
+      # Ensure both JSON and YAML specs (no heredoc)
       - name: Ensure both JSON and YAML specs
         shell: bash
         run: |
           set -Eeuo pipefail
-          python3 - <<'PY'
-            import os, json, sys
-            try:
-                import yaml
-            except ImportError:
-                import subprocess
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "PyYAML"])
-                import yaml
-            d="target/openapi"; os.makedirs(d, exist_ok=True)
-            jp=os.path.join(d,"openapi.json"); yp=os.path.join(d,"openapi.yaml")
-            if os.path.isfile(jp) and not os.path.isfile(yp):
-                with open(jp) as f: data=json.load(f)
-                with open(yp,"w") as f: yaml.safe_dump(data,f,sort_keys=False)
-                print("Created openapi.yaml from json")
-            elif os.path.isfile(yp) and not os.path.isfile(jp):
-                with open(yp) as f: data=yaml.safe_load(f)
-                with open(jp,"w") as f: json.dump(data,f,indent=2)
-                print("Created openapi.json from yaml")
-            else:
-                print("Both or neither present; no conversion")
-            PY
+          python3 -m pip install --user PyYAML >/dev/null 2>&1 || true
+          if [ -f target/openapi/openapi.json ] && [ ! -f target/openapi/openapi.yaml ]; then
+            python3 -c "import json,yaml; d='target/openapi/openapi.json'; y='target/openapi/openapi.yaml'; data=json.load(open(d)); yaml.safe_dump(data, open(y,'w'), sort_keys=False); print('Created openapi.yaml from json')"
+          elif [ -f target/openapi/openapi.yaml ] && [ ! -f target/openapi/openapi.json ]; then
+            python3 -c "import json,yaml; y='target/openapi/openapi.yaml'; d='target/openapi/openapi.json'; data=yaml.safe_load(open(y)); json.dump(data, open(d,'w'), indent=2); print('Created openapi.json from yaml')"
+          else
+            echo "Both or neither present; no conversion"
+          fi
 
+      # OpenAPI -> HTML docs
       - name: Install OpenAPI Generator CLI
         shell: bash
         run: |
@@ -195,12 +189,14 @@ jobs:
               -o target/api-docs/yaml || true
           fi
 
+      # jdeps seed
       - name: Extract dependency graph (jdeps)
         shell: bash
         run: |
           set -Eeuo pipefail
           jdeps -q --multi-release 17 -recursive -verbose:class "$JAR_FILE" > target/jdeps.txt || true
 
+      # Inspect target
       - name: Inspect target
         if: always()
         shell: bash
@@ -211,6 +207,7 @@ jobs:
           echo "---- api-docs/json ----"; ls -al target/api-docs/json || true
           echo "---- api-docs/yaml ----"; ls -al target/api-docs/yaml || true
 
+      # Ensure artifact bundle
       - name: Ensure artifact bundle
         if: always()
         shell: bash
@@ -227,6 +224,7 @@ jobs:
             echo "app.log not found - app may not have started or logs redirected elsewhere" > target/app.log
           fi
 
+      # Upload artifacts
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -252,6 +250,7 @@ jobs:
             kill $(cat target/petclinic.pid) || true
           fi
 
+  # Deploy to GitHub Pages (main/master push에서만)
   deploy-pages:
     needs: build-test-docs
     runs-on: ubuntu-latest
@@ -280,6 +279,8 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p public
+
+          # Copy html2 docs into subfolders
           if [ -d _artifacts/target/api-docs/json ]; then
             mkdir -p public/docs-json
             cp -r _artifacts/target/api-docs/json/* public/docs-json/
@@ -288,11 +289,14 @@ jobs:
             mkdir -p public/docs-yaml
             cp -r _artifacts/target/api-docs/yaml/* public/docs-yaml/
           fi
+
+          # Copy OpenAPI specs
           mkdir -p public/openapi
           if [ -d _artifacts/target/openapi ]; then
             cp -r _artifacts/target/openapi/* public/openapi/ || true
           fi
 
+          # Build index.html with only existing links
           has_json_docs=false; has_yaml_docs=false; has_yaml=false; has_json=false
           [ -f public/docs-json/index.html ] && has_json_docs=true
           [ -f public/docs-yaml/index.html ] && has_yaml_docs=true
