@@ -7,7 +7,6 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-# GitHub Pages 배포(OIDC 포함) 권한
 permissions:
   contents: read
   pages: write
@@ -21,7 +20,6 @@ jobs:
   build-test-docs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
-
     permissions:
       contents: read
 
@@ -43,7 +41,7 @@ jobs:
           java -version
           ./mvnw -v
 
-      # ---- Build & package ----
+      # Build & package
       - name: Build (skip tests)
         shell: bash
         run: |
@@ -64,7 +62,7 @@ jobs:
           echo "JAR_FILE=$JAR_FILE" >> $GITHUB_ENV
           echo "Found: $JAR_FILE"
 
-      # ---- Run app (force port/context/profile) ----
+      # Run app
       - name: Start app (background)
         shell: bash
         run: |
@@ -78,7 +76,7 @@ jobs:
           echo $! > target/petclinic.pid
           echo "PID: $(cat target/petclinic.pid)"
 
-      # ---- Health check (multi-URL + longer wait) ----
+      # Health check
       - name: Wait for health
         shell: bash
         run: |
@@ -106,12 +104,11 @@ jobs:
             sleep 2
           done
           echo "App failed to become healthy within timeout"
-          echo "---- last 200 lines of app.log ----"
           tail -n 200 target/app.log || true
           (command -v ss >/dev/null && ss -lptn || true)
           exit 1
 
-      # ---- Fetch OpenAPI (robust) ----
+      # Fetch OpenAPI
       - name: Fetch OpenAPI (JSON/YAML)
         shell: bash
         run: |
@@ -120,30 +117,29 @@ jobs:
           YAML_URL="${OPENAPI_YAML_URL:-http://localhost:9966/petclinic/v3/api-docs.yaml}"
           mkdir -p target/openapi
 
-          printf 'Try JSON: %s\n' "$JSON_URL"
+          echo "Try JSON: $JSON_URL"
           if curl --fail --silent --show-error "$JSON_URL" -o target/openapi/openapi.json; then
-            echo "Saved target/openapi/openapi.json"
+            echo "Saved openapi.json"
           else
             echo "JSON endpoint not found (continuing)"
           fi
 
-          printf 'Try YAML: %s\n' "$YAML_URL"
+          echo "Try YAML: $YAML_URL"
           if curl --fail --silent --show-error "$YAML_URL" -o target/openapi/openapi.yaml; then
-            echo "Saved target/openapi/openapi.yaml"
+            echo "Saved openapi.yaml"
           else
             echo "YAML endpoint not found (continuing)"
           fi
 
           ls -l target/openapi || true
 
-      # ---- Sanitize OpenAPI (fix invalid fields) ----
+      # Sanitize OpenAPI (fix invalid fields)
       - name: Sanitize OpenAPI (fix invalid fields)
         shell: bash
         run: |
           set -Eeuo pipefail
           if [ -f target/openapi/openapi.json ]; then
             tmp="$(mktemp)"
-            # info.license.extensions -> info.license.x-extensions 로 이동
             jq '
               if (.info? and .info.license? and .info.license.extensions?) then
                 .info.license |= (. + {"x-extensions": .extensions} | del(.extensions))
@@ -151,10 +147,41 @@ jobs:
             ' target/openapi/openapi.json > "$tmp" && mv "$tmp" target/openapi/openapi.json
             echo "Sanitized: moved info.license.extensions -> info.license.x-extensions"
           else
-            echo "No target/openapi/openapi.json to sanitize (skipping)"
+            echo "No openapi.json to sanitize (skipping)"
           fi
 
-      # ---- OpenAPI → HTML 문서 생성 (skip validation) ----
+      # Ensure both JSON and YAML exist
+      - name: Ensure both JSON and YAML specs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+import os, json, sys
+try:
+    import yaml  # PyYAML
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "PyYAML"])
+    import yaml
+
+dir="target/openapi"
+os.makedirs(dir, exist_ok=True)
+jp=os.path.join(dir,"openapi.json")
+yp=os.path.join(dir,"openapi.yaml")
+
+if os.path.isfile(jp) and not os.path.isfile(yp):
+    with open(jp) as f: data=json.load(f)
+    with open(yp, "w") as f: yaml.safe_dump(data, f, sort_keys=False)
+    print("Created openapi.yaml from json")
+elif os.path.isfile(yp) and not os.path.isfile(jp):
+    with open(yp) as f: data=yaml.safe_load(f)
+    with open(jp, "w") as f: json.dump(data, f, indent=2)
+    print("Created openapi.json from yaml")
+else:
+    print("Both or neither present; no conversion")
+PY
+
+      # OpenAPI -> HTML docs
       - name: Install OpenAPI Generator CLI
         shell: bash
         run: |
@@ -182,29 +209,25 @@ jobs:
               -o target/api-docs/yaml || true
           fi
 
-      # ---- jdeps seed ----
+      # jdeps seed
       - name: Extract dependency graph (jdeps)
         shell: bash
         run: |
           set -Eeuo pipefail
           jdeps -q --multi-release 17 -recursive -verbose:class "$JAR_FILE" > target/jdeps.txt || true
 
-      # ---- 진단용: target 내용 출력 ----
+      # Inspect target
       - name: Inspect target
         if: always()
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "PWD: $PWD"
-          ls -al || true
-          echo "---- target ----"
-          ls -al target || true
-          echo "---- openapi ----"
-          ls -al target/openapi || true
-          echo "---- api-docs ----"
-          ls -al target/api-docs || true
+          echo "---- target ----"; ls -al target || true
+          echo "---- openapi ----"; ls -al target/openapi || true
+          echo "---- api-docs/json ----"; ls -al target/api-docs/json || true
+          echo "---- api-docs/yaml ----"; ls -al target/api-docs/yaml || true
 
-      # ---- 아티팩트가 비어도 최소 파일 보장 ----
+      # Ensure artifact bundle
       - name: Ensure artifact bundle
         if: always()
         shell: bash
@@ -221,7 +244,7 @@ jobs:
             echo "app.log not found - app may not have started or logs redirected elsewhere" > target/app.log
           fi
 
-      # ---- ✅ 아티팩트 업로드 (항상 수행) ----
+      # Upload artifacts
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -238,7 +261,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # ---- 종료 ----
       - name: Stop app
         if: always()
         shell: bash
@@ -248,21 +270,18 @@ jobs:
             kill $(cat target/petclinic.pid) || true
           fi
 
-  # GitHub Pages로 공개 (main/master push에서만)
+  # Deploy to GitHub Pages (main/master push에서만)
   deploy-pages:
     needs: build-test-docs
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-
     permissions:
       contents: read
       pages: write
       id-token: write
-
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-
     steps:
       - name: Configure Pages (auto enable)
         uses: actions/configure-pages@v5
@@ -280,20 +299,41 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p public
-          # API HTML 문서 복사
-          if [ -d _artifacts/target/api-docs/json ]; then cp -r _artifacts/target/api-docs/json/* public/; fi
-          if [ -d _artifacts/target/api-docs/yaml ]; then cp -r _artifacts/target/api-docs/yaml/* public/; fi
-          # OpenAPI 스펙 복사
-          if [ -d _artifacts/target/openapi ]; then mkdir -p public/openapi; cp -r _artifacts/target/openapi/* public/openapi/; fi
-          # index.html (printf 사용)
-          printf '%s\n' \
-            '<!doctype html><meta charset="utf-8">' \
-            '<h1>Reverse Docs</h1>' \
-            '<ul>' \
-            '  <li><a href="./index.html">API Docs (html2)</a></li>' \
-            '  <li><a href="./openapi/openapi.yaml">openapi.yaml</a></li>' \
-            '  <li><a href="./openapi/openapi.json">openapi.json</a></li>' \
-            '</ul>' > public/index.html
+
+          # Copy html2 docs into subfolders (avoid index overwrite)
+          if [ -d _artifacts/target/api-docs/json ]; then
+            mkdir -p public/docs-json
+            cp -r _artifacts/target/api-docs/json/* public/docs-json/
+          fi
+          if [ -d _artifacts/target/api-docs/yaml ]; then
+            mkdir -p public/docs-yaml
+            cp -r _artifacts/target/api-docs/yaml/* public/docs-yaml/
+          fi
+
+          # Copy OpenAPI specs (ensure folder exists even if empty)
+          mkdir -p public/openapi
+          if [ -d _artifacts/target/openapi ]; then
+            cp -r _artifacts/target/openapi/* public/openapi/ || true
+          fi
+
+          # Build index.html with only existing links
+          has_json_docs=false; has_yaml_docs=false; has_yaml=false; has_json=false
+          [ -f public/docs-json/index.html ] && has_json_docs=true
+          [ -f public/docs-yaml/index.html ] && has_yaml_docs=true
+          [ -f public/openapi/openapi.yaml ] && has_yaml=true
+          [ -f public/openapi/openapi.json ] && has_json=true
+
+          {
+            echo '<!doctype html><meta charset="utf-8"><title>Reverse Docs</title>'
+            echo '<h1>Reverse Docs</h1>'
+            echo '<ul>'
+            $has_json_docs && echo '  <li><a href="./docs-json/index.html">API Docs (html2, from JSON)</a>'
+            $has_yaml_docs && echo '  <li><a href="./docs-yaml/index.html">API Docs (html2, from YAML)</a>'
+            $has_yaml && echo '  <li><a href="./openapi/openapi.yaml">openapi.yaml</a>'
+            $has_json && echo '  <li><a href="./openapi/openapi.json">openapi.json</a>'
+            echo '</ul>'
+          } > public/index.html
+
           echo "Public dir contents:"
           find public -maxdepth 2 -type f -print
 
