@@ -7,97 +7,104 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+concurrency:
+  group: reverse-docs-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-test-docs:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
 
     permissions:
       contents: read
-      actions: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK
+      - name: Set up JDK 17 (with Maven cache)
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
-          cache: 'maven'
+          cache: maven
 
-      # 1) Build & Test (Jacoco/SpotBugs 등 리포트 생성)
-      - name: Maven verify (tests, jacoco)
-        run: ./mvnw -B -U clean verify
-
-      # 2) 패키징 (optional)
-      - name: Package
-        run: ./mvnw -B -DskipTests package
-
-      # 3) 앱 부팅하여 OpenAPI 스펙 수집 (/petclinic/v3/api-docs)
-# (기존) Start app (background) 단계를 아래처럼 교체
-      - name: Package (skip tests for faster boot)
-        run: ./mvnw -B -DskipTests package
-      
-      - name: Start app (background, force port/context/profile)
+      - name: Show Java & Maven
         run: |
-          nohup java -jar target/*.jar \
+          java -version
+          ./mvnw -v
+
+      # ---- Build (skip tests for faster packaging; 필요시 verify 단계 추가) ----
+      - name: Build (skip tests)
+        run: ./mvnw -B -DskipTests package
+
+      - name: Resolve JAR path
+        id: jar
+        run: |
+          set -e
+          JAR_FILE="$(find target -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' | head -n 1)"
+          if [ -z "$JAR_FILE" ]; then
+            echo "No runnable JAR found in target/"
+            ls -l target || true
+            exit 1
+          fi
+          echo "JAR_FILE=$JAR_FILE" >> $GITHUB_ENV
+          echo "Found: $JAR_FILE"
+
+      # ---- Run app in background (force port/context/profile) ----
+      - name: Start app (background)
+        run: |
+          nohup java -jar "$JAR_FILE" \
             --server.port=9966 \
             --server.servlet.context-path=/petclinic \
-            --spring.profiles.active=h2 \
+            --spring.profiles.active=h2,spring-data-jpa \
+            --management.endpoints.web.exposure.include=health,info \
             > target/app.log 2>&1 &
           echo $! > target/petclinic.pid
-      
-      - name: Wait for health (longer + verbose)
+          echo "PID: $(cat target/petclinic.pid)"
+
+      # ---- Robust health check (multi-URL + longer wait + periodic log tail) ----
+      - name: Wait for health
         run: |
-          for i in {1..120}; do
-            if curl -fsS http://localhost:9966/petclinic/actuator/health >/dev/null; then
-              echo "App is up"; exit 0
-            fi
+          set -e
+          urls=(
+            http://localhost:9966/petclinic/actuator/health
+            http://127.0.0.1:9966/petclinic/actuator/health
+            # fallback (classic root context)
+            http://localhost:9966/actuator/health
+            # in case you accidentally run classic PetClinic on 8080
+            http://localhost:8080/actuator/health
+          )
+          for i in $(seq 1 120); do
+            for u in "${urls[@]}"; do
+              if curl -fsS -4 "$u" >/dev/null; then
+                echo "App is up: $u"
+                echo "HEALTH_URL=$u" >> $GITHUB_ENV
+                exit 0
+              fi
+            done
             if [ $((i%10)) -eq 0 ]; then
-              echo "--- tail app.log ---"; tail -n 80 target/app.log || true
-              echo "--------------------"
+              echo "---- tail app.log (last 120 lines) ----"
+              tail -n 120 target/app.log || true
+              echo "---- listening ports (9966) ----"
+              (command -v ss >/dev/null && ss -lptn 'sport = :9966' || lsof -i :9966 || true)
             fi
             sleep 2
           done
-          echo "App failed to start"
-          echo "--- last 200 lines of app.log ---"
+          echo "App failed to become healthy within timeout"
+          echo "---- last 200 lines of app.log ----"
           tail -n 200 target/app.log || true
-          # 포트 점유 상태도 출력
-          (command -v ss >/dev/null && ss -lptn || lsof -i :9966 || true)
+          (command -v ss >/dev/null && ss -lptn || true)
           exit 1
 
-      # 4) OpenAPI로 HTML 문서 생성 (openapi-generator)
-      - name: Install OpenAPI Generator CLI
+      # ---- Fetch OpenAPI (JSON + YAML endpoint) ----
+      - name: Fetch OpenAPI (JSON/YAML)
         run: |
-          curl -sL https://repo1.maven.org/maven2/org/openapitools/openapi-generator-cli/7.7.0/openapi-generator-cli-7.7.0.jar -o openapi-generator-cli.jar
-
-      - name: Generate HTML API docs
-        run: |
-          mkdir -p target/api-docs
-          java -jar openapi-generator-cli.jar generate \
-            -i target/openapi.json \
-            -g html2 \
-            -o target/api-docs
-
-      # 5) jdeps로 의존 다이어그램용 기초 데이터 추출
-      - name: Extract dependency graph (jdeps)
-        run: |
-          jdeps -q --multi-release 17 -recursive -verbose:class target/*.jar > target/jdeps.txt
-
-      # 6) (옵션) SchemaSpy: H2 메모리 DB는 직접 연결 어렵기 때문에,
-      #    필요 시 profile을 MySQL/PostgreSQL로 띄우고 연결 정보 세팅 후 사용 권장.
-      #    여기서는 아티팩트 업로드만 포함.
-
-      # 7) 아티팩트 업로드 (OpenAPI, HTML 문서, 테스트 리포트, jdeps 로그 등)
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: reverse-docs-artifacts
-          path: |
-            target/openapi.json
-            target/openapi.yaml
-            target/api-docs/**
-            target/site/**
-            target/jdeps.txt
-            target/app.log
+          set -e
+          # common PetClinic REST paths
+          JSON_URL=${OPENAPI_JSON_URL:-http://localhost:9966/petclinic/v3/api-docs}
+          YAML_URL=${OPENAPI_YAML_URL:-http://localhost:9966/petclinic/v3/api-docs.yaml}
+          mkdir -p target/openapi
+          echo "Try JSON: $JSON_URL"
+          curl -fsS "$JSON_URL" -o target/openapi/openapi.json || echo "JSON_
