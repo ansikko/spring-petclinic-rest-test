@@ -41,7 +41,6 @@ jobs:
           java -version
           ./mvnw -v
 
-      # Build & package
       - name: Build (skip tests)
         shell: bash
         run: |
@@ -62,7 +61,6 @@ jobs:
           echo "JAR_FILE=$JAR_FILE" >> $GITHUB_ENV
           echo "Found: $JAR_FILE"
 
-      # Run app
       - name: Start app (background)
         shell: bash
         run: |
@@ -76,7 +74,6 @@ jobs:
           echo $! > target/petclinic.pid
           echo "PID: $(cat target/petclinic.pid)"
 
-      # Health check
       - name: Wait for health
         shell: bash
         run: |
@@ -108,7 +105,6 @@ jobs:
           (command -v ss >/dev/null && ss -lptn || true)
           exit 1
 
-      # Fetch OpenAPI
       - name: Fetch OpenAPI (JSON/YAML)
         shell: bash
         run: |
@@ -117,20 +113,20 @@ jobs:
           YAML_URL="${OPENAPI_YAML_URL:-http://localhost:9966/petclinic/v3/api-docs.yaml}"
           mkdir -p target/openapi
           echo "Try JSON: $JSON_URL"
-          if curl --fail --silent --show-error "$JSON_URL" -o target/openapi/openapi.json; then
-            echo "Saved openapi.json"
-          else
-            echo "JSON endpoint not found (continuing)"
-          fi
+          curl -sS -w "\nHTTP %{http_code}\n" -o target/openapi/openapi.json "$JSON_URL" || true
+          [ -s target/openapi/openapi.json ] || rm -f target/openapi/openapi.json
           echo "Try YAML: $YAML_URL"
-          if curl --fail --silent --show-error "$YAML_URL" -o target/openapi/openapi.yaml; then
-            echo "Saved openapi.yaml"
-          else
-            echo "YAML endpoint not found (continuing)"
-          fi
-          ls -l target/openapi || true
+          curl -sS -w "\nHTTP %{http_code}\n" -o target/openapi/openapi.yaml "$YAML_URL" || true
+          [ -s target/openapi/openapi.yaml ] || rm -f target/openapi/openapi.yaml
+          echo "OpenAPI dir listing:"; ls -l target/openapi || true
 
-      # Sanitize OpenAPI (fix invalid fields)
+      - name: Install jq (for JSON sanitize)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y jq >/dev/null
+
       - name: Sanitize OpenAPI (fix invalid fields)
         shell: bash
         run: |
@@ -147,8 +143,7 @@ jobs:
             echo "No openapi.json to sanitize (skipping)"
           fi
 
-      # Ensure both JSON and YAML specs (no heredoc)
-      - name: Ensure both JSON and YAML specs
+      - name: Ensure both JSON and YAML specs (no heredoc)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -161,7 +156,6 @@ jobs:
             echo "Both or neither present; no conversion"
           fi
 
-      # OpenAPI -> HTML docs
       - name: Install OpenAPI Generator CLI
         shell: bash
         run: |
@@ -189,14 +183,12 @@ jobs:
               -o target/api-docs/yaml || true
           fi
 
-      # jdeps seed
       - name: Extract dependency graph (jdeps)
         shell: bash
         run: |
           set -Eeuo pipefail
           jdeps -q --multi-release 17 -recursive -verbose:class "$JAR_FILE" > target/jdeps.txt || true
 
-      # Inspect target
       - name: Inspect target
         if: always()
         shell: bash
@@ -207,7 +199,6 @@ jobs:
           echo "---- api-docs/json ----"; ls -al target/api-docs/json || true
           echo "---- api-docs/yaml ----"; ls -al target/api-docs/yaml || true
 
-      # Ensure artifact bundle
       - name: Ensure artifact bundle
         if: always()
         shell: bash
@@ -224,7 +215,6 @@ jobs:
             echo "app.log not found - app may not have started or logs redirected elsewhere" > target/app.log
           fi
 
-      # Upload artifacts
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -250,7 +240,6 @@ jobs:
             kill $(cat target/petclinic.pid) || true
           fi
 
-  # Deploy to GitHub Pages (main/master push에서만)
   deploy-pages:
     needs: build-test-docs
     runs-on: ubuntu-latest
@@ -274,6 +263,14 @@ jobs:
           name: reverse-docs-artifacts
           path: ./_artifacts
 
+      - name: Inspect downloaded artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "---- _artifacts tree ----"
+          (command -v tree >/dev/null || sudo apt-get update >/dev/null 2>&1 && sudo apt-get install -y tree >/dev/null 2>&1) || true
+          tree -a -L 3 _artifacts || find _artifacts -maxdepth 3 -type f -print
+
       - name: Prepare site
         shell: bash
         run: |
@@ -296,6 +293,14 @@ jobs:
             cp -r _artifacts/target/openapi/* public/openapi/ || true
           fi
 
+          # Debug files for quick diagnosis
+          if [ -f _artifacts/target/app.log ]; then
+            cp _artifacts/target/app.log public/app.log
+          fi
+          if [ -f _artifacts/target/_meta/README.txt ]; then
+            cp _artifacts/target/_meta/README.txt public/ARTIFACT_INFO.txt
+          fi
+
           # Build index.html with only existing links
           has_json_docs=false; has_yaml_docs=false; has_yaml=false; has_json=false
           [ -f public/docs-json/index.html ] && has_json_docs=true
@@ -303,14 +308,21 @@ jobs:
           [ -f public/openapi/openapi.yaml ] && has_yaml=true
           [ -f public/openapi/openapi.json ] && has_json=true
 
-          printf '%s\n' '<!doctype html><meta charset="utf-8"><title>Reverse Docs</title>' > public/index.html
-          printf '%s\n' '<h1>Reverse Docs</h1>' >> public/index.html
-          printf '%s\n' '<ul>' >> public/index.html
-          $has_json_docs && printf '%s\n' '  <li><a href="./docs-json/index.html">API Docs (html2, from JSON)</a></li>' >> public/index.html
-          $has_yaml_docs && printf '%s\n' '  <li><a href="./docs-yaml/index.html">API Docs (html2, from YAML)</a></li>' >> public/index.html
-          $has_yaml && printf '%s\n' '  <li><a href="./openapi/openapi.yaml">openapi.yaml</a></li>' >> public/index.html
-          $has_json && printf '%s\n' '  <li><a href="./openapi/openapi.json">openapi.json</a></li>' >> public/index.html
-          printf '%s\n' '</ul>' >> public/index.html
+          {
+            echo '<!doctype html><meta charset="utf-8"><title>Reverse Docs</title>'
+            echo '<h1>Reverse Docs</h1>'
+            echo '<ul>'
+            $has_json_docs && echo '  <li><a href="./docs-json/index.html">API Docs (html2, from JSON)</a></li>'
+            $has_yaml_docs && echo '  <li><a href="./docs-yaml/index.html">API Docs (html2, from YAML)</a></li>'
+            $has_yaml && echo '  <li><a href="./openapi/openapi.yaml">openapi.yaml</a></li>'
+            $has_json && echo '  <li><a href="./openapi/openapi.json">openapi.json</a></li>'
+            echo '  <li><a href="./app.log">app.log</a> (debug)</li>'
+            echo '  <li><a href="./ARTIFACT_INFO.txt">artifact info</a> (debug)</li>'
+            echo '</ul>'
+            if ! $has_json_docs && ! $has_yaml_docs && ! $has_yaml && ! $has_json; then
+              echo '<p><strong>No API docs/specs found in artifact.</strong><br/>Check app.log and the build job logs (Fetch OpenAPI / Generate HTML).</p>'
+            fi
+          } > public/index.html
 
           echo "Public dir contents:"; find public -maxdepth 2 -type f -print
 
