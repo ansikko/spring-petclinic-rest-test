@@ -98,13 +98,31 @@ jobs:
           (command -v ss >/dev/null && ss -lptn || true)
           exit 1
 
-      # ---- Fetch OpenAPI (JSON + YAML endpoint) ----
-      - name: Fetch OpenAPI (JSON/YAML)
-        run: |
-          set -e
-          # common PetClinic REST paths
-          JSON_URL=${OPENAPI_JSON_URL:-http://localhost:9966/petclinic/v3/api-docs}
-          YAML_URL=${OPENAPI_YAML_URL:-http://localhost:9966/petclinic/v3/api-docs.yaml}
-          mkdir -p target/openapi
-          echo "Try JSON: $JSON_URL"
-          curl -fsS "$JSON_URL" -o target/openapi/openapi.json || echo "JSON_
+          - name: Fetch OpenAPI (JSON/YAML)
+            shell: bash
+            run: |
+              set -Eeuo pipefail
+          
+              # 기본값(레포 변수로 덮어쓰려면 Repository → Settings → Variables에서
+              # OPENAPI_JSON_URL / OPENAPI_YAML_URL 추가)
+              JSON_URL="${OPENAPI_JSON_URL:-http://localhost:9966/petclinic/v3/api-docs}"
+              YAML_URL="${OPENAPI_YAML_URL:-http://localhost:9966/petclinic/v3/api-docs.yaml}"
+          
+              mkdir -p target/openapi
+          
+              printf 'Try JSON: %s\n' "$JSON_URL"
+              if curl --fail --silent --show-error "$JSON_URL" -o target/openapi/openapi.json; then
+                echo "Saved target/openapi/openapi.json"
+              else
+                echo "JSON endpoint not found (continuing)"
+              fi
+          
+              printf 'Try YAML: %s\n' "$YAML_URL"
+              if curl --fail --silent --show-error "$YAML_URL" -o target/openapi/openapi.yaml; then
+                echo "Saved target/openapi/openapi.yaml"
+              else
+                echo "YAML endpoint not found (continuing)"
+              fi
+          
+              echo "OpenAPI files:"
+              ls -l target/openapi || true
