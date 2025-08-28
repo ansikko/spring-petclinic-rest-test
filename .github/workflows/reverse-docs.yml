@@ -1,0 +1,100 @@
+name: Reverse Docs Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-test-docs:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'maven'
+
+      # 1) Build & Test (Jacoco/SpotBugs 등 리포트 생성)
+      - name: Maven verify (tests, jacoco)
+        run: ./mvnw -B -U clean verify
+
+      # 2) 패키징 (optional)
+      - name: Package
+        run: ./mvnw -B -DskipTests package
+
+      # 3) 앱 부팅하여 OpenAPI 스펙 수집 (/petclinic/v3/api-docs)
+      - name: Start app (background)
+        run: |
+          nohup ./mvnw -q spring-boot:run -Dspring-boot.run.profiles=h2 > target/app.log 2>&1 &
+          echo $! > target/petclinic.pid
+
+      - name: Wait for health
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:9966/petclinic/actuator/health >/dev/null; then
+              echo "App is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "App failed to start"; cat target/app.log; exit 1
+
+      - name: Fetch OpenAPI JSON
+        run: |
+          curl -fsS http://localhost:9966/petclinic/v3/api-docs -o target/openapi.json
+          # YAML도 필요하면 변환 (yq)
+          pipx install yq >/dev/null 2>&1 || true
+          if command -v yq >/dev/null; then
+            cat target/openapi.json | yq -P > target/openapi.yaml
+          fi
+
+      - name: Stop app
+        if: always()
+        run: |
+          kill $(cat target/petclinic.pid) || true
+
+      # 4) OpenAPI로 HTML 문서 생성 (openapi-generator)
+      - name: Install OpenAPI Generator CLI
+        run: |
+          curl -sL https://repo1.maven.org/maven2/org/openapitools/openapi-generator-cli/7.7.0/openapi-generator-cli-7.7.0.jar -o openapi-generator-cli.jar
+
+      - name: Generate HTML API docs
+        run: |
+          mkdir -p target/api-docs
+          java -jar openapi-generator-cli.jar generate \
+            -i target/openapi.json \
+            -g html2 \
+            -o target/api-docs
+
+      # 5) jdeps로 의존 다이어그램용 기초 데이터 추출
+      - name: Extract dependency graph (jdeps)
+        run: |
+          jdeps -q --multi-release 17 -recursive -verbose:class target/*.jar > target/jdeps.txt
+
+      # 6) (옵션) SchemaSpy: H2 메모리 DB는 직접 연결 어렵기 때문에,
+      #    필요 시 profile을 MySQL/PostgreSQL로 띄우고 연결 정보 세팅 후 사용 권장.
+      #    여기서는 아티팩트 업로드만 포함.
+
+      # 7) 아티팩트 업로드 (OpenAPI, HTML 문서, 테스트 리포트, jdeps 로그 등)
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: reverse-docs-artifacts
+          path: |
+            target/openapi.json
+            target/openapi.yaml
+            target/api-docs/**
+            target/site/**
+            target/jdeps.txt
+            target/app.log
