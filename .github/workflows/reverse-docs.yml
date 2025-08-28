@@ -35,34 +35,37 @@ jobs:
         run: ./mvnw -B -DskipTests package
 
       # 3) 앱 부팅하여 OpenAPI 스펙 수집 (/petclinic/v3/api-docs)
-      - name: Start app (background)
+# (기존) Start app (background) 단계를 아래처럼 교체
+      - name: Package (skip tests for faster boot)
+        run: ./mvnw -B -DskipTests package
+      
+      - name: Start app (background, force port/context/profile)
         run: |
-          nohup ./mvnw -q spring-boot:run -Dspring-boot.run.profiles=h2 > target/app.log 2>&1 &
+          nohup java -jar target/*.jar \
+            --server.port=9966 \
+            --server.servlet.context-path=/petclinic \
+            --spring.profiles.active=h2 \
+            > target/app.log 2>&1 &
           echo $! > target/petclinic.pid
-
-      - name: Wait for health
+      
+      - name: Wait for health (longer + verbose)
         run: |
-          for i in {1..60}; do
+          for i in {1..120}; do
             if curl -fsS http://localhost:9966/petclinic/actuator/health >/dev/null; then
               echo "App is up"; exit 0
             fi
+            if [ $((i%10)) -eq 0 ]; then
+              echo "--- tail app.log ---"; tail -n 80 target/app.log || true
+              echo "--------------------"
+            fi
             sleep 2
           done
-          echo "App failed to start"; cat target/app.log; exit 1
-
-      - name: Fetch OpenAPI JSON
-        run: |
-          curl -fsS http://localhost:9966/petclinic/v3/api-docs -o target/openapi.json
-          # YAML도 필요하면 변환 (yq)
-          pipx install yq >/dev/null 2>&1 || true
-          if command -v yq >/dev/null; then
-            cat target/openapi.json | yq -P > target/openapi.yaml
-          fi
-
-      - name: Stop app
-        if: always()
-        run: |
-          kill $(cat target/petclinic.pid) || true
+          echo "App failed to start"
+          echo "--- last 200 lines of app.log ---"
+          tail -n 200 target/app.log || true
+          # 포트 점유 상태도 출력
+          (command -v ss >/dev/null && ss -lptn || lsof -i :9966 || true)
+          exit 1
 
       # 4) OpenAPI로 HTML 문서 생성 (openapi-generator)
       - name: Install OpenAPI Generator CLI
