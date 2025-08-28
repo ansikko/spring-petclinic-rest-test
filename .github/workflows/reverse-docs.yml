@@ -18,6 +18,8 @@ jobs:
 
     permissions:
       contents: read
+      pages: write
+      id-token: write
 
     steps:
       - name: Checkout
@@ -35,16 +37,17 @@ jobs:
           java -version
           ./mvnw -v
 
-      # ---- Build (skip tests for faster packaging; 필요시 verify 단계 추가) ----
+      # ---- Build & package ----
       - name: Build (skip tests)
         run: ./mvnw -B -DskipTests package
 
       - name: Resolve JAR path
         id: jar
+        shell: bash
         run: |
-          set -e
-          JAR_FILE="$(find target -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' | head -n 1)"
-          if [ -z "$JAR_FILE" ]; then
+          set -Eeuo pipefail
+          JAR_FILE="$(find target -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' | head -n 1 || true)"
+          if [ -z "${JAR_FILE:-}" ]; then
             echo "No runnable JAR found in target/"
             ls -l target || true
             exit 1
@@ -52,9 +55,11 @@ jobs:
           echo "JAR_FILE=$JAR_FILE" >> $GITHUB_ENV
           echo "Found: $JAR_FILE"
 
-      # ---- Run app in background (force port/context/profile) ----
+      # ---- Run app (force port/context/profile) ----
       - name: Start app (background)
+        shell: bash
         run: |
+          set -Eeuo pipefail
           nohup java -jar "$JAR_FILE" \
             --server.port=9966 \
             --server.servlet.context-path=/petclinic \
@@ -64,16 +69,15 @@ jobs:
           echo $! > target/petclinic.pid
           echo "PID: $(cat target/petclinic.pid)"
 
-      # ---- Robust health check (multi-URL + longer wait + periodic log tail) ----
+      # ---- Health check (multi-URL + longer wait) ----
       - name: Wait for health
+        shell: bash
         run: |
-          set -e
+          set -Eeuo pipefail
           urls=(
             http://localhost:9966/petclinic/actuator/health
             http://127.0.0.1:9966/petclinic/actuator/health
-            # fallback (classic root context)
             http://localhost:9966/actuator/health
-            # in case you accidentally run classic PetClinic on 8080
             http://localhost:8080/actuator/health
           )
           for i in $(seq 1 120); do
@@ -87,8 +91,8 @@ jobs:
             if [ $((i%10)) -eq 0 ]; then
               echo "---- tail app.log (last 120 lines) ----"
               tail -n 120 target/app.log || true
-              echo "---- listening ports (9966) ----"
-              (command -v ss >/dev/null && ss -lptn 'sport = :9966' || lsof -i :9966 || true)
+              echo "---- listening ports ----"
+              (command -v ss >/dev/null && ss -lptn || lsof -i :9966 || true)
             fi
             sleep 2
           done
@@ -98,31 +102,159 @@ jobs:
           (command -v ss >/dev/null && ss -lptn || true)
           exit 1
 
-          - name: Fetch OpenAPI (JSON/YAML)
-            shell: bash
-            run: |
-              set -Eeuo pipefail
-          
-              # 기본값(레포 변수로 덮어쓰려면 Repository → Settings → Variables에서
-              # OPENAPI_JSON_URL / OPENAPI_YAML_URL 추가)
-              JSON_URL="${OPENAPI_JSON_URL:-http://localhost:9966/petclinic/v3/api-docs}"
-              YAML_URL="${OPENAPI_YAML_URL:-http://localhost:9966/petclinic/v3/api-docs.yaml}"
-          
-              mkdir -p target/openapi
-          
-              printf 'Try JSON: %s\n' "$JSON_URL"
-              if curl --fail --silent --show-error "$JSON_URL" -o target/openapi/openapi.json; then
-                echo "Saved target/openapi/openapi.json"
-              else
-                echo "JSON endpoint not found (continuing)"
-              fi
-          
-              printf 'Try YAML: %s\n' "$YAML_URL"
-              if curl --fail --silent --show-error "$YAML_URL" -o target/openapi/openapi.yaml; then
-                echo "Saved target/openapi/openapi.yaml"
-              else
-                echo "YAML endpoint not found (continuing)"
-              fi
-          
-              echo "OpenAPI files:"
-              ls -l target/openapi || true
+      # ---- Fetch OpenAPI (robust) ----
+      - name: Fetch OpenAPI (JSON/YAML)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          JSON_URL="${OPENAPI_JSON_URL:-http://localhost:9966/petclinic/v3/api-docs}"
+          YAML_URL="${OPENAPI_YAML_URL:-http://localhost:9966/petclinic/v3/api-docs.yaml}"
+          mkdir -p target/openapi
+
+          printf 'Try JSON: %s\n' "$JSON_URL"
+          if curl --fail --silent --show-error "$JSON_URL" -o target/openapi/openapi.json; then
+            echo "Saved target/openapi/openapi.json"
+          else
+            echo "JSON endpoint not found (continuing)"
+          fi
+
+          printf 'Try YAML: %s\n' "$YAML_URL"
+          if curl --fail --silent --show-error "$YAML_URL" -o target/openapi/openapi.yaml; then
+            echo "Saved target/openapi/openapi.yaml"
+          else
+            echo "YAML endpoint not found (continuing)"
+          fi
+
+          ls -l target/openapi || true
+
+      # ---- OpenAPI → HTML 문서 생성 ----
+      - name: Install OpenAPI Generator CLI
+        run: |
+          curl -sL https://repo1.maven.org/maven2/org/openapitools/openapi-generator-cli/7.7.0/openapi-generator-cli-7.7.0.jar -o openapi-generator-cli.jar
+
+      - name: Generate HTML API docs
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          mkdir -p target/api-docs
+          if [ -f target/openapi/openapi.json ]; then
+            java -jar openapi-generator-cli.jar generate \
+              -i target/openapi/openapi.json \
+              -g html2 \
+              -o target/api-docs/json || true
+          fi
+          if [ -f target/openapi/openapi.yaml ]; then
+            java -jar openapi-generator-cli.jar generate \
+              -i target/openapi/openapi.yaml \
+              -g html2 \
+              -o target/api-docs/yaml || true
+          fi
+
+      # ---- jdeps seed ----
+      - name: Extract dependency graph (jdeps)
+        run: |
+          jdeps -q --multi-release 17 -recursive -verbose:class "$JAR_FILE" > target/jdeps.txt || true
+
+      # ---- 진단용: target 내용 출력 ----
+      - name: Inspect target
+        if: always()
+        run: |
+          echo "PWD: $PWD"
+          ls -al || true
+          echo "---- target ----"
+          ls -al target || true
+          echo "---- openapi ----"
+          ls -al target/openapi || true
+          echo "---- api-docs ----"
+          ls -al target/api-docs || true
+
+      # ---- 아티팩트가 비어도 최소 파일 보장 ----
+      - name: Ensure artifact bundle
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p target/_meta
+          {
+            echo "Reverse Docs Artifact"
+            date -u
+            echo "Jar: ${JAR_FILE:-N/A}"
+            echo "Health URL: ${HEALTH_URL:-N/A}"
+          } > target/_meta/README.txt
+          if [ ! -f target/app.log ]; then
+            echo "app.log not found - app may not have started or logs redirected elsewhere" > target/app.log
+          fi
+
+      # ---- ✅ 아티팩트 업로드 (항상 수행) ----
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reverse-docs-artifacts
+          path: |
+            target/openapi/**
+            target/api-docs/**
+            target/jdeps.txt
+            target/app.log
+            target/site/**
+            target/surefire-reports/**
+            target/_meta/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      # ---- 종료 ----
+      - name: Stop app
+        if: always()
+        run: |
+          if [ -f target/petclinic.pid ]; then
+            kill $(cat target/petclinic.pid) || true
+          fi
+
+  # (선택) GitHub Pages로 공개
+  deploy-pages:
+    needs: build-test-docs
+    runs-on: ubuntu-latest
+    if: always()
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: reverse-docs-artifacts
+          path: ./_artifacts
+
+      - name: Prepare site
+        run: |
+          mkdir -p ./public
+          if [ -d _artifacts/target/api-docs/json ]; then
+            cp -r _artifacts/target/api-docs/json/* ./public/
+          fi
+          if [ -d _artifacts/target/api-docs/yaml ]; then
+            cp -r _artifacts/target/api-docs/yaml/* ./public/
+          fi
+          if [ -d _artifacts/target/openapi ]; then
+            mkdir -p ./public/openapi
+            cp -r _artifacts/target/openapi/* ./public/openapi/
+          fi
+          if [ ! -f ./public/index.html ]; then
+            cat > ./public/index.html <<'HTML'
+            <!doctype html><meta charset="utf-8">
+            <h1>Reverse Docs</h1>
+            <ul>
+              <li><a href="./index.html">API Docs (html2)</a></li>
+              <li><a href="./openapi/openapi.yaml">openapi.yaml</a></li>
+              <li><a href="./openapi/openapi.json">openapi.json</a></li>
+            </ul>
+            HTML
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
