@@ -215,7 +215,7 @@ jobs:
             kill $(cat target/petclinic.pid) || true
           fi
 
-  # GitHub Pages로 공개 (main/master로 push될 때만)
+  # GitHub Pages로 공개 (main/master로 push될 때만 )
   deploy-pages:
     needs: build-test-docs
     runs-on: ubuntu-latest
