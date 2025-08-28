@@ -41,7 +41,6 @@ jobs:
           java -version
           ./mvnw -v
 
-      # Build & package
       - name: Build (skip tests)
         shell: bash
         run: |
@@ -62,7 +61,6 @@ jobs:
           echo "JAR_FILE=$JAR_FILE" >> $GITHUB_ENV
           echo "Found: $JAR_FILE"
 
-      # Run app
       - name: Start app (background)
         shell: bash
         run: |
@@ -76,7 +74,6 @@ jobs:
           echo $! > target/petclinic.pid
           echo "PID: $(cat target/petclinic.pid)"
 
-      # Health check
       - name: Wait for health
         shell: bash
         run: |
@@ -108,7 +105,6 @@ jobs:
           (command -v ss >/dev/null && ss -lptn || true)
           exit 1
 
-      # Fetch OpenAPI
       - name: Fetch OpenAPI (JSON/YAML)
         shell: bash
         run: |
@@ -116,24 +112,20 @@ jobs:
           JSON_URL="${OPENAPI_JSON_URL:-http://localhost:9966/petclinic/v3/api-docs}"
           YAML_URL="${OPENAPI_YAML_URL:-http://localhost:9966/petclinic/v3/api-docs.yaml}"
           mkdir -p target/openapi
-
           echo "Try JSON: $JSON_URL"
           if curl --fail --silent --show-error "$JSON_URL" -o target/openapi/openapi.json; then
             echo "Saved openapi.json"
           else
             echo "JSON endpoint not found (continuing)"
           fi
-
           echo "Try YAML: $YAML_URL"
           if curl --fail --silent --show-error "$YAML_URL" -o target/openapi/openapi.yaml; then
             echo "Saved openapi.yaml"
           else
             echo "YAML endpoint not found (continuing)"
           fi
-
           ls -l target/openapi || true
 
-      # Sanitize OpenAPI (fix invalid fields)
       - name: Sanitize OpenAPI (fix invalid fields)
         shell: bash
         run: |
@@ -150,7 +142,6 @@ jobs:
             echo "No openapi.json to sanitize (skipping)"
           fi
 
-      # Ensure both JSON and YAML exist
       - name: Ensure both JSON and YAML specs
         shell: bash
         run: |
@@ -158,30 +149,25 @@ jobs:
           python3 - <<'PY'
 import os, json, sys
 try:
-    import yaml  # PyYAML
+    import yaml
 except ImportError:
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "PyYAML"])
     import yaml
-
-dir="target/openapi"
-os.makedirs(dir, exist_ok=True)
-jp=os.path.join(dir,"openapi.json")
-yp=os.path.join(dir,"openapi.yaml")
-
+d="target/openapi"; os.makedirs(d, exist_ok=True)
+jp=os.path.join(d,"openapi.json"); yp=os.path.join(d,"openapi.yaml")
 if os.path.isfile(jp) and not os.path.isfile(yp):
     with open(jp) as f: data=json.load(f)
-    with open(yp, "w") as f: yaml.safe_dump(data, f, sort_keys=False)
+    with open(yp,"w") as f: yaml.safe_dump(data,f,sort_keys=False)
     print("Created openapi.yaml from json")
 elif os.path.isfile(yp) and not os.path.isfile(jp):
     with open(yp) as f: data=yaml.safe_load(f)
-    with open(jp, "w") as f: json.dump(data, f, indent=2)
+    with open(jp,"w") as f: json.dump(data,f,indent=2)
     print("Created openapi.json from yaml")
 else:
     print("Both or neither present; no conversion")
 PY
 
-      # OpenAPI -> HTML docs
       - name: Install OpenAPI Generator CLI
         shell: bash
         run: |
@@ -209,14 +195,12 @@ PY
               -o target/api-docs/yaml || true
           fi
 
-      # jdeps seed
       - name: Extract dependency graph (jdeps)
         shell: bash
         run: |
           set -Eeuo pipefail
           jdeps -q --multi-release 17 -recursive -verbose:class "$JAR_FILE" > target/jdeps.txt || true
 
-      # Inspect target
       - name: Inspect target
         if: always()
         shell: bash
@@ -227,7 +211,6 @@ PY
           echo "---- api-docs/json ----"; ls -al target/api-docs/json || true
           echo "---- api-docs/yaml ----"; ls -al target/api-docs/yaml || true
 
-      # Ensure artifact bundle
       - name: Ensure artifact bundle
         if: always()
         shell: bash
@@ -244,7 +227,6 @@ PY
             echo "app.log not found - app may not have started or logs redirected elsewhere" > target/app.log
           fi
 
-      # Upload artifacts
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -270,7 +252,6 @@ PY
             kill $(cat target/petclinic.pid) || true
           fi
 
-  # Deploy to GitHub Pages (main/master push에서만)
   deploy-pages:
     needs: build-test-docs
     runs-on: ubuntu-latest
@@ -299,8 +280,6 @@ PY
         run: |
           set -Eeuo pipefail
           mkdir -p public
-
-          # Copy html2 docs into subfolders (avoid index overwrite)
           if [ -d _artifacts/target/api-docs/json ]; then
             mkdir -p public/docs-json
             cp -r _artifacts/target/api-docs/json/* public/docs-json/
@@ -309,33 +288,27 @@ PY
             mkdir -p public/docs-yaml
             cp -r _artifacts/target/api-docs/yaml/* public/docs-yaml/
           fi
-
-          # Copy OpenAPI specs (ensure folder exists even if empty)
           mkdir -p public/openapi
           if [ -d _artifacts/target/openapi ]; then
             cp -r _artifacts/target/openapi/* public/openapi/ || true
           fi
 
-          # Build index.html with only existing links
           has_json_docs=false; has_yaml_docs=false; has_yaml=false; has_json=false
           [ -f public/docs-json/index.html ] && has_json_docs=true
           [ -f public/docs-yaml/index.html ] && has_yaml_docs=true
           [ -f public/openapi/openapi.yaml ] && has_yaml=true
           [ -f public/openapi/openapi.json ] && has_json=true
 
-          {
-            echo '<!doctype html><meta charset="utf-8"><title>Reverse Docs</title>'
-            echo '<h1>Reverse Docs</h1>'
-            echo '<ul>'
-            $has_json_docs && echo '  <li><a href="./docs-json/index.html">API Docs (html2, from JSON)</a>'
-            $has_yaml_docs && echo '  <li><a href="./docs-yaml/index.html">API Docs (html2, from YAML)</a>'
-            $has_yaml && echo '  <li><a href="./openapi/openapi.yaml">openapi.yaml</a>'
-            $has_json && echo '  <li><a href="./openapi/openapi.json">openapi.json</a>'
-            echo '</ul>'
-          } > public/index.html
+          printf '%s\n' '<!doctype html><meta charset="utf-8"><title>Reverse Docs</title>' > public/index.html
+          printf '%s\n' '<h1>Reverse Docs</h1>' >> public/index.html
+          printf '%s\n' '<ul>' >> public/index.html
+          $has_json_docs && printf '%s\n' '  <li><a href="./docs-json/index.html">API Docs (html2, from JSON)</a></li>' >> public/index.html
+          $has_yaml_docs && printf '%s\n' '  <li><a href="./docs-yaml/index.html">API Docs (html2, from YAML)</a></li>' >> public/index.html
+          $has_yaml && printf '%s\n' '  <li><a href="./openapi/openapi.yaml">openapi.yaml</a></li>' >> public/index.html
+          $has_json && printf '%s\n' '  <li><a href="./openapi/openapi.json">openapi.json</a></li>' >> public/index.html
+          printf '%s\n' '</ul>' >> public/index.html
 
-          echo "Public dir contents:"
-          find public -maxdepth 2 -type f -print
+          echo "Public dir contents:"; find public -maxdepth 2 -type f -print
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
