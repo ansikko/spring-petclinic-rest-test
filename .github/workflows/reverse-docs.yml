@@ -7,7 +7,7 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-# GitHub Pages 배포에 필요한 권한(OIDC 포함)
+# GitHub Pages 배포(OIDC 포함) 권한
 permissions:
   contents: read
   pages: write
@@ -22,7 +22,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
-    # 이 잡은 소스 읽기만 필요
     permissions:
       contents: read
 
@@ -38,13 +37,18 @@ jobs:
           cache: maven
 
       - name: Show Java & Maven
+        shell: bash
         run: |
+          set -Eeuo pipefail
           java -version
           ./mvnw -v
 
       # ---- Build & package ----
       - name: Build (skip tests)
-        run: ./mvnw -B -DskipTests package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./mvnw -B -DskipTests package
 
       - name: Resolve JAR path
         id: jar
@@ -132,13 +136,34 @@ jobs:
 
           ls -l target/openapi || true
 
-      # ---- OpenAPI → HTML 문서 생성 ----
-      - name: Install OpenAPI Generator CLI
+      # ---- Sanitize OpenAPI (fix invalid fields) ----
+      - name: Sanitize OpenAPI (fix invalid fields)
+        shell: bash
         run: |
+          set -Eeuo pipefail
+          if [ -f target/openapi/openapi.json ]; then
+            tmp="$(mktemp)"
+            # info.license.extensions -> info.license.x-extensions 로 이동
+            jq '
+              if (.info? and .info.license? and .info.license.extensions?) then
+                .info.license |= (. + {"x-extensions": .extensions} | del(.extensions))
+              else . end
+            ' target/openapi/openapi.json > "$tmp" && mv "$tmp" target/openapi/openapi.json
+            echo "Sanitized: moved info.license.extensions -> info.license.x-extensions"
+          else
+            echo "No target/openapi/openapi.json to sanitize (skipping)"
+          fi
+
+      # ---- OpenAPI → HTML 문서 생성 (skip validation) ----
+      - name: Install OpenAPI Generator CLI
+        shell: bash
+        run: |
+          set -Eeuo pipefail
           curl -sL https://repo1.maven.org/maven2/org/openapitools/openapi-generator-cli/7.7.0/openapi-generator-cli-7.7.0.jar -o openapi-generator-cli.jar
 
       - name: Generate HTML API docs
         if: always()
+        shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p target/api-docs
@@ -146,24 +171,30 @@ jobs:
             java -jar openapi-generator-cli.jar generate \
               -i target/openapi/openapi.json \
               -g html2 \
+              --skip-validate-spec \
               -o target/api-docs/json || true
           fi
           if [ -f target/openapi/openapi.yaml ]; then
             java -jar openapi-generator-cli.jar generate \
               -i target/openapi/openapi.yaml \
               -g html2 \
+              --skip-validate-spec \
               -o target/api-docs/yaml || true
           fi
 
       # ---- jdeps seed ----
       - name: Extract dependency graph (jdeps)
+        shell: bash
         run: |
+          set -Eeuo pipefail
           jdeps -q --multi-release 17 -recursive -verbose:class "$JAR_FILE" > target/jdeps.txt || true
 
       # ---- 진단용: target 내용 출력 ----
       - name: Inspect target
         if: always()
+        shell: bash
         run: |
+          set -Eeuo pipefail
           echo "PWD: $PWD"
           ls -al || true
           echo "---- target ----"
@@ -210,18 +241,19 @@ jobs:
       # ---- 종료 ----
       - name: Stop app
         if: always()
+        shell: bash
         run: |
+          set -Eeuo pipefail
           if [ -f target/petclinic.pid ]; then
             kill $(cat target/petclinic.pid) || true
           fi
 
-  # GitHub Pages로 공개 (main/master로 push될 때만 )
+  # GitHub Pages로 공개 (main/master push에서만)
   deploy-pages:
     needs: build-test-docs
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
 
-    # 배포 잡 권한 (OIDC 필요)
     permissions:
       contents: read
       pages: write
@@ -232,8 +264,10 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Configure Pages
+      - name: Configure Pages (auto enable)
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -251,7 +285,7 @@ jobs:
           if [ -d _artifacts/target/api-docs/yaml ]; then cp -r _artifacts/target/api-docs/yaml/* public/; fi
           # OpenAPI 스펙 복사
           if [ -d _artifacts/target/openapi ]; then mkdir -p public/openapi; cp -r _artifacts/target/openapi/* public/openapi/; fi
-          # index.html (heredoc 대신 printf 사용)
+          # index.html (printf 사용)
           printf '%s\n' \
             '<!doctype html><meta charset="utf-8">' \
             '<h1>Reverse Docs</h1>' \
